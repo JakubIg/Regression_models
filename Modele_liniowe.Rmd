@@ -1,0 +1,372 @@
+---
+title: "Modele_liniowe"
+author: "Jakub Ignatik"
+date: "26 maja 2018"
+output: html_document
+---
+##Wprowadzenie
+
+Celem projektu jest budowa modelu liniowego dla spalania samochodów. Model budowany jest na podstawie pliku "cars.csv", który przedstawia spalanie, liczbê cylindrów, objêtoœæ silnika, moc w koniach mechanicznych, wagê, czas przyspieszenia, rok i miejsce produkcji dla danych modeli samochodów. Dane s¹ podanie w systemie amerykañskim, dlatego zachodziæ bêdzie koniecznoœæ przekszta³cenia ich na system europejski.  
+**UWAGA!**Przenios³em formatowanie danych do kolejnej czêœci, aby we wprowadzeniu zaj¹æ siê ogólnym wprowadzeniem oraz przedstawieniem hipotez. Zdecydowa³em siê te¿ na umieszczenie kodu równie¿ w pliku html, ¿eby nie by³o potrzeby zagl¹dania do pliku Ÿród³owego.  
+**Hipotezy:**  Co do przedzia³u ufnoœci, myœlê, ¿e ten bootstrapowy bêdzie wê¿szy, dla wszystkich parametrów modelu bêdzie mniejszy rozrzut. Spodziewam siê te¿ lepszego dopasowania do danych dla modelu bootstrapowego - bêdzie za tym iœæ wiêkszy wspó³czynnik determinacji, lepsze kryteria informacyjne. Parametry nie powinny siê zbytnio ró¿niæ (podejrzewam, ¿e ten sam zbiór zostanie wskazany w obu metodach).  
+Jeœli chodzi o to, które zmienne znajd¹ siê w modelu, na samym wstêpie mogê odrzuciæ nazwy samochodów. Nie bêdzie te¿ na pewno albo pojemnoœci silnika, albo liczby cylindrów (mo¿e ich obu), gdy¿ objêtoœæ silnika zale¿y od liczby cylindrów. Nie wydaje mi siê te¿, ¿eby pochodzenie samochodu wp³ywa³o szczególnie na spalanie.  
+
+### Klasyczny model liniowy  
+
+Na samym pocz¹tku za³adujê biblioteki i wczytam ramkê danych, a nastêpnie zamieniê jednostki na system europejski (zostawiam przyspieszenie, poniewa¿ jest to nieznaczna ró¿nica w wielkoœci) oraz usuwam nazwy samochodów (nie maj¹ one znaczenia w modelu).
+```{r, warning=FALSE, message=FALSE}
+library(stats)
+library(tidyr)
+library(ggplot2)
+library(tibble)
+library(lmtest)
+
+```
+```{r}
+dane <- read.csv("cars.csv", dec=".",sep=",",header=TRUE)
+#Zamiana spalania z mpg na l/100km
+dane[1] = round(235.21/dane[1],2)
+colnames(dane)[1] = "lnskm"
+#Zamiana objêtoœci silnika z cali^3 na cm^3
+dane[3] = dane[3]*16.39
+#Zamiana wagi z funtów na kilogramy
+dane[5] = dane[5]*0.45
+#Usuniêcie nazw samochodów
+dane[9] = NULL
+```
+
+Postanowi³em zamieniæ zmienn¹ "origin" na zmienn¹ zero-jedynkow¹, poniewa¿ przypisanie ró¿nych mno¿ników do pochodzenia mog³oby zniekszta³ciæ parametr przy tej zmiennej.
+```{r}
+#1 - auto pochodzi z USA, 0 - z innego kraju
+for (i in 1:314){
+  if (dane[i,8] == 1)
+    dane[i,9] = 1
+  else
+    dane[i,9] = 0
+}
+
+#1 - auto pochodzi z Europy, 0 - z innego kontynentu
+for (i in 1:314){
+  if (dane[i,8] == 2)
+    dane[i,10] = 1
+  else
+    dane[i,10] = 0
+}
+
+
+#1 - auto pochodzi z Japonii, 0 - z innego kraju
+for (i in 1:314){
+  if (dane[i,8] == 3)
+    dane[i,11] = 1
+  else
+    dane[i,11] = 0
+}
+
+dane[8] <- dane[9]
+colnames(dane)[8] = "USA"
+
+dane[9] <- dane[10]
+colnames(dane)[9] = "Europe"
+
+dane[10] <- dane[11]
+colnames(dane)[10] = "Japan"
+
+dane[11] <- NULL
+```
+Do wstêpnej redukcji zmiennych pos³u¿y mi wspó³czynnik zmiennoœci, badaj¹cy zró¿nicowanie cechy.  
+```{r}
+for (i in 1:10){
+  print(paste(colnames(dane)[i], ": ", (sd(dane[,i])/mean(dane[,i]))*100, sep=''))
+}
+```
+Zmienna "year" jest statystycznie nieistotna, poniewa¿ posiada mniej ni¿ 10% zmiennoœci. Nale¿y zatem usun¹æ j¹ z modelu.  
+```{r}
+dd <- c("lnskm","cylinders","displacement","horsepower","weight","acceleration","USA","Europe","Japan")
+dane <- dane[dd]
+```
+Aby lepiej zobrazowaæ zale¿noœci w modelu, pos³u¿ê siê teraz macierz¹ korelacji.  
+```{r, out.width="1000px"}
+COR <- cor(dane[,1:9])
+image(x=seq(nrow(COR)), y=seq(ncol(COR)), z=cor(dane[,1:9]), axes=F, xlab="", ylab="")
+text(expand.grid(x=seq(dim(COR)[1]), y=seq(dim(COR)[2])), labels=round(c(COR),2))
+box()
+axis(1, at=seq(nrow(COR)), labels = rownames(COR), las=2)
+axis(2, at=seq(ncol(COR)), labels = colnames(COR), las=1)
+```
+  
+Mo¿na zauwa¿yæ, ¿e zmienne dziel¹ siê na dwie grupy:  
+-zmienne cylinders, displacement, horsepower oraz weight s¹ silnie skorelowane ze zmienn¹ objaœnian¹, ale jednoczeœnie s¹ silnie skorelowane miêdzy sob¹ (przewodzi tu zmienna displacement, u której pojawia siê wspó³czynnik powy¿ej 0,9),  
+-zmienne acceleration, USA, Europe i Japan s¹ doœæ s³abo skorelowane ze zmienn¹ objaœniaj¹c¹ (wyj¹tek stanowi zmienna USA), ale korelacja miêdzy sob¹ i innymi zmiennymi objaœniaj¹cym i jest na przyzwoitym poziomie.  
+Widaæ mocn¹ korelacjê z innymi zmiennymi dla zmiennej "displacement" - zw³aszcza z liczb¹ koni mechanicznych, co wspomnia³em w hipotezie. Pochodzenie samochodu te¿ wydaje siê nie byæ istotne, wszystkie 3 zmienne posiadaj¹ doœæ s³ab¹ korelacjê ze spalaniem.  
+Do znalezienia najlepszego zbioru pos³u¿y mi metoda Hellwiga, która uwzglêdnia korelacjê (oraz wspó³czynnik zmiennoœci, to jednak zosta³o przeze mnie przeanalizowane osobno).  
+```{r}
+hellwig <- function( y, x, method="pearson")
+{
+  requireNamespace("utils")
+  x <- as.data.frame(x)
+  cm <- stats::cor(x, method=method) # korelacje wewn¹trz zmiennych niezale¿nych 
+  cd <- stats::cor(x, y, method=method) # korelacje ze zmienn¹ zale¿n¹
+  # lista kombinacji zmiennych
+  k <- sapply( seq(2, length(x)), function(i)
+    utils::combn(length(x), i, simplify=FALSE) )
+  k <- do.call("c", k)
+  # liczenie indywidualnych wskaŸników pojemnoœci informacyjnych
+  hfun <- function(v)
+  {
+    sapply(v, function(i) cd[i]^2 / sum(abs(cm[v,i])) )
+  }
+  #budowanie ramki danych dla zintegrowanych wskaŸników pojemnoœci informacyjnych
+  h <- sapply(k, hfun)
+  data.frame( k = sapply( k, paste, collapse="-"),
+              h = sapply(h, sum),
+              stringsAsFactors=FALSE)
+}
+#metoda Hellwiga na badanym zbiorze
+hh <- hellwig(dane[,1],dane[,2:9],method = "pearson")
+#wskazanie kombinacji o najwiêkszej pojemnoœci informacyjnej
+hh[which.max(hh[,2]),]
+```
+Dla wskazanej kombinacji zbudujê model liniowy i sprawdzê, czy nie ma w nim katalizatorów:  
+```{r}
+katalizator <- function(y, xlist){
+  k = length(xlist)
+  ramka <- data.frame(y,xlist)
+
+  #tworzê macierze R i R0
+  R <- matrix(data=0,nrow = k, ncol = k)
+  R0 <- matrix(data=0,nrow = k, ncol = 1)
+  for (i in 1:k){
+    COR <- cor(ramka$y,ramka[i+1])
+    R0[i,1]=COR
+    for (j in 1:k){
+      COR <- cor(ramka[i+1],ramka[j+1])
+      R[i,j]= COR
+    }
+  }
+
+  #macierz "przejscie" pozwoli na stworzenie regularnego R0 poprzez okreœlenie     kolejnoœci zmiennych w regularnym R0
+  przejscie <- matrix(data=0, nrow = k, ncol = 2)
+  R0_regularne <- matrix(data=sort(abs(R0)),nrow = k,ncol = 1)
+  for (i in 1:k){
+    for (j in 1:k){
+      if (R0_regularne[i,1] == abs(R0[j,1])){
+        przejscie[i,1]=j
+        if (R0[j,1]>0){
+          przejscie[j,2]=1
+        }
+        else{
+          przejscie[j,2]=-1
+        }
+      }
+    }
+  }
+  
+  #tworzenie regularnego R
+  R_regularne <- R
+  for (i in 1:k){
+    i = przejscie[i,1]
+    for (j in 1:k){
+      R_regularne[i,j]=przejscie[przejscie[j,1],2]*przejscie[przejscie[i,1],2]*R[przejscie[j,1],przejscie[i,1]]
+      R_regularne[j,i]=R_regularne[i,j] 
+    }
+  }
+  
+  katalizator <- 0
+  
+  #sprawdzanie macierzy R_regularne pod k¹tem obecnoœci zmiennych-katalizatoróW
+  for (i in 1:k){
+    for (j in 1:k){
+      a <- R_regularne[i,j]
+      if ((i<j) & (a < 0 | a > (R0_regularne[i,1]/R0_regularne[j,1]))){
+        katalizator = a
+      }
+    }
+  }
+  zz <- 0
+
+  for (i in 1:k){
+    for (j in 1:k){
+      numer <- przejscie[i,1]
+      if ((R[i,j] == katalizator | abs(R[i,j]) == katalizator) & i<j){
+        print("Numer zmiennej objaœniaj¹cej bêd¹cej katalizatorem:")
+        print(numer)
+        zz = zz+1
+        print("Wartoœæ katalizatora:")
+        print(katalizator)
+      }
+    }
+  }
+  if (zz == 0){
+    print("Brak katalizatorów")
+  }
+}
+
+y <- dane$lnskm
+lista <- list(dane$horsepower,dane$weight)
+katalizator(y,lista)
+```
+W modelu nie wystêpuje zmienna-katalizator, czyli wspó³czynnik determinacji nie jest zawy¿any.  
+Zbudujê teraz model dla wskazanej przez Helwiga kombinacji i sprawdzê jego statystyczn¹ istotnoœæ oraz wartoœæ R^2.  
+```{r}
+model <- lm(lnskm ~ horsepower+weight, data = dane)
+summary(model)
+```
+Wspó³czynnik determinacji jest wysoki, nie ma do niego zastrze¿eñ. Co do wa¿noœci parametrów, model jako ca³oœæ jest statystycznie istotny (wykaza³a to statystyka F). Kiedy jednak spojrzy siê na istotnoœæ poszczególnych parametrów, okazuje siê, ¿e sta³a jest nieistotna statystycznie. Przeprowadzê teraz Partial F-test, który wyka¿e, czy po odjêciu z modelu sta³ej nie zwiêkszy siê suma b³êdów podniesionych do kwadratu (SSE).  
+```{r}
+#H0: Brak statystycznej istotnej ró¿nicy w SSE w obu modelach.
+#H1: Model "pe³ny" ma statystycznie mniejsze SSE ni¿ model zredukowany.
+model_zredukowany <- lm(lnskm ~ 0+horsepower+weight, data = dane)
+anova(model_zredukowany,model)
+```
+Jak widaæ, nie ma podstaw do odrzucenia hipotezy H0, czyli model zredukowany nie zwiêksza SSE. Nale¿y zatem pozostaæ na zredukowanym modelu.  
+```{r}
+model <- model_zredukowany
+summary(model)
+```
+Nowy model posiada wspó³czynnik determinacji bliski 1, co bardzo dobrze œwiadczy o modelu. Nale¿y teraz zbadaæ, czy w modelu nie wystêpuje wspó³liniowoœæ. W tym celu utworzê dwa nowe modele i sprawdzê, czy ich wspó³czynniki determinacji nie przekraczaj¹ wartoœci 0.9.
+```{r}
+#waga wyjaœniana za pomoc¹ koni
+model_wsp <- lm(weight ~ 0+horsepower, data = dane)
+summary(model_wsp)$r.squared
+#konie wyjaœnione za pomoc¹ wagi
+model_wsp2 <- lm(horsepower ~ 0+weight, data = dane)
+summary(model_wsp2)$r.squared
+```
+Okazuje siê, ¿e w modelu wystêpuje wspó³liniowoœæ. W obu przypadkach wspó³czynnik determinacji przekroczy³ wartoœæ 0.9. Gdyby w modelu by³a sta³a, problem nie wyst¹pi³by, jednak sta³a nie by³aby statystycznie istotna. Mo¿na zauwa¿yæ, ¿e z racji du¿ych korelacji miêdzy zmiennymi objaœniaj¹cymi trudno jest unikn¹æ takiego problemu, dlatego te¿ postanowi³em nie dzia³aæ w kierunku likwidacji wspó³liniowoœci. Przetestujê teraz, czy spe³nione s¹ pozosta³e za³o¿enia dobrego modelu liniowego.  
+```{r out.width="1000px"}
+par(mfrow=c(2,2))
+plot(model)
+```
+  
+Na pierwszym wykresie, gdzie skonfrontowane s¹ reszty modelu z jego dopasowaniem, mo¿na zauwa¿yæ p³ask¹, czerwon¹ liniê, co œwiadczy o spe³nieniu za³o¿enia dotycz¹cego liniowoœci modelu. Punkty tworz¹ chmurê, nie widaæ, aby na pocz¹tku czy koñcu oddala³y siê od linii, co œwiadczy o tym, ¿e model nie jest heteroskedastyczny.  
+Na wykresie Q-Q (kwantyl-kwantyl) widaæ, ¿e punkty tworz¹ liniê prost¹ (z wyj¹tkiem samego pocz¹tku i koñca - mo¿e byæ za ma³o danych w modelu), co œwiadczy o tym, ¿e spe³nione jest za³o¿enie o normalnoœci reszt.  
+Na trzecim wykresie, Scale-Location, widaæ doœæ p³ask¹, czerwon¹ liniê, co potwierdza homoskedastycznoœæ modelu.  
+Na ostatnim z czterech wykresów, Residuals vs Leverage, przedstawiona pokaza³a odleg³oœæ Cooka, czyli miara stopnia zmiany wspó³czynników regresji, gdyby dany przypadek pomin¹æ w obliczeniach wspó³czynników (miara wp³ywu poszczególnych obserwacji na prost¹ regresji). Gdyby któryœ przypadek znalaz³ siê za lini¹ Cooka, nale¿a³oby go wykluczyæ z modelu, aby by³ on bardziej dopasowany. W tym przypadku jednak wszystko jest w porz¹dku, takie punkty nie istniej¹.    
+  
+Zbadam teraz, czy w modelu nie wystêpuje autokorelacja.  
+```{r}
+acf(residuals(model))
+```
+  
+Jeœli s³upki mieszcz¹ siê pomiêdzy dwoma niebieskimi liniami, oznacza to, ¿e sk³adniki losowe dotycz¹ce ró¿nych obserwacji nie s¹ skorelowane, czyli autokorelacja nie wystêpuje. W ukazanym wy¿ej wykresie autokorelacja nie wystêpuje, gdy¿ pierwszy s³upek zawsze ma du¿¹ wartoœæ.  
+
+### Model bootstrapowy  
+
+Pocz¹tek jest taki sam, jak przy metodzie klasycznej: zamieniam jednostki, wyrzucam nazwy samochodów, przekszta³cam zmienn¹ "origin" i wyrzucam zmienn¹ "year". Teraz zweryfikujê, które zmienne s¹ statystycznie istotne. Powinno to przebiegaæ stopniowo, bez wyrzucania wszystkich zmiennych nieistotnych jednoczeœnie, jednak nie posiadam pêtli, która by to wykona³a. Przy wyrzuceniu wszystkich zmiennych nieistotnych naraz wyszed³ ten sam zbiór, co przy redukowaniu krok po kroku, wiêc zaprezentujê kod "przyspieszony".  
+```{r, error=TRUE}
+N<- length(dane[,1])
+#pierwszy zbiór jest dla sta³ej, a dalsze dla kolejnych zmiennych objaœniaj¹cych
+zbior <- rep(NA, 10000)
+zbior2 <- rep(NA, 10000)
+zbior3 <- rep(NA, 10000)
+zbior4 <- rep(NA, 10000)
+zbior5 <- rep(NA, 10000)
+zbior6 <- rep(NA, 10000)
+zbior7 <- rep(NA, 10000)
+zbior8 <- rep(NA, 10000)
+zbior9 <- rep(NA, 10000)
+
+for (i in 1:10000){
+  idx <- sample(1:N, N, replace = TRUE)
+  nowe_dane <- dane[idx,]
+  model_nowy <- lm(lnskm ~ cylinders+displacement+horsepower+weight+acceleration+USA+Europe+Japan, data = nowe_dane)
+  zbior[i] <- coef(model_nowy)[1]
+  zbior2[i] <- coef(model_nowy)[2]
+  zbior3[i] <- coef(model_nowy)[3]
+  zbior4[i] <- coef(model_nowy)[4]
+  zbior5[i] <- coef(model_nowy)[5]
+  zbior6[i] <- coef(model_nowy)[6]
+  zbior7[i] <- coef(model_nowy)[7]
+  zbior8[i] <- coef(model_nowy)[8]
+  zbior9[i] <- coef(model_nowy)[9]
+}
+
+#przedzia³Y ufnoœci dla parametrów
+quantile(zbior, c(0.025, 0.975))
+quantile(zbior2, c(0.025, 0.975))
+quantile(zbior3, c(0.025, 0.975))
+quantile(zbior4, c(0.025, 0.975))
+quantile(zbior5, c(0.025, 0.975))
+quantile(zbior6, c(0.025, 0.975))
+quantile(zbior7, c(0.025, 0.975))
+quantile(zbior8, c(0.025, 0.975))
+quantile(zbior9, c(0.025, 0.975))
+```
+Z powy¿szych obliczeñ wynika, ¿e zmiennymi statystycznie istotnymi s¹ te stanowi¹ce zbiór 5 i 6, czyli zmienne "horsepower" i "weight" (sta³a to zbiór 1). Wygl¹da to zatem tak samo, jak dla modelu klasycznego. Przy zbiorze 9 wyst¹pi³ b³¹d, gdy¿ zmienna "Japan" nie posiada swojego wspó³czynnika.  
+Przeprowadzê teraz ponownie model bootstrapowy, ale wy³¹cznie dla zmiennych wskazanych wy¿ej. Sprawdzê równie¿ parametry dla tego modelu.  
+```{r}
+#wspó³czynnik determinacji R^2
+r2 <- rep(NA, 10000)
+#skorygowany wspó³czynnik determinacji R^2
+adjr2 <- rep(NA, 10000)
+#AIC
+aic <- rep(NA, 10000)
+#BIC
+bic <- rep(NA, 10000)
+#zbiorek jest dla parametrów przy zmiennej "horsepower"
+zbiorek <- rep(NA, 10000)
+#zbiorek2 jest dla parametrów przy zmiennej "weight"
+zbiorek2 <- rep(NA, 10000)
+
+for (i in 1:10000){
+  idx <- sample(1:N, N, replace = TRUE)
+  nowe_dane <- dane[idx,]
+  model_nowy <- lm(lnskm ~ 0+horsepower+weight, data = nowe_dane)
+  r2[i] <- summary(model_nowy)$r.squared
+  adjr2[i] <- summary(model_nowy)$r.squared
+  aic[i] <- AIC(model_nowy)
+  bic[i] <- BIC(model_nowy)
+  zbiorek[i] <- coef(model_nowy)[1]
+  zbiorek2[i] <- coef(model_nowy)[2]
+}
+```
+Porównam teraz parametry modelu klasycznego z modelem bootstrapowym:  
+```{r}
+klasyk <- c(coef(model)[1],coef(model)[2],summary(model)$r.squared,summary(model)$adj.r.squared,AIC(model),BIC(model))
+boot <- c(mean(zbiorek),mean(zbiorek2),mean(r2),mean(adjr2),mean(aic),mean(bic))
+ramka <- format(data.frame(klasyk,boot),scientific = FALSE)
+colnames(ramka) <- c("Klasyk","Bootstrap")
+rownames(ramka) <- c("Horsepower","Weight","R^2","SKorygowane R^2", "AIC", "BIC")
+ramka
+```
+Jeœli chodzi o poprawnoœæ modelu, lepiej wypada model bootstrapowy. Wspó³czynnik determinacji jest wy¿szy ni¿ w modelu klasycznym, a skorygowane R^2 jest tak samo wysokie jak sam wspó³czynnik (model nie jest ani trochê przeparametryzowany). Oba kryteria informacyjne równie¿ wypadaj¹ lepiej (bootstrap daje lepsze dopasowanie modelu, ale z wiêkszym prawdopodobieñstwem jest przeuczony). Nale¿y jednak zwróciæ uwagê na to, ¿e ró¿nice te s¹ niedu¿e, ale nie zmienia to faktu, ¿e trafnie przewidzia³em ró¿nice w obu modelach.  
+Parametr przy zmiennej "Horsepower" jest wiêkszy ni¿ w modelu klasycznym, natomiast przy parametrze "Weight" sytuacja jest odwrotna. Wykonam teraz wykres dla przedzia³ów ufnoœci w bootstrapie i w modelu klasycznym, co pozwoli zobrazowaæ ró¿nicê.  
+```{r}
+coefs_model <- summary(model)$coefficients
+
+set.seed(123)
+wykres <- tibble(bootstrap = zbiorek,
+                 classic = 
+                   coefs_model[1,1] + 
+                   rnorm(10^4)*coefs_model[1,2] ) %>%
+  gather(type, parameter)
+
+
+wykres %>%
+  ggplot(aes(x = parameter, col = type)) + 
+  geom_density()
+```
+  
+Jak widaæ na wykresie, przedzia³ ufnoœci dla zmiennej "horsepower" jest wê¿szy i wy¿szy przy metodzie klasycznej. Spodziewa³em siê sytuacji odwrotnej. Parametry dla zmiennej "horsepower" okaza³y siê mieæ wiêkszy "rozrzut" dla metody bootstrapowej.   
+```{r}
+set.seed(123)
+wykres <- tibble(bootstrap = zbiorek2,
+                 classic = 
+                   coefs_model[2,1] + 
+                   rnorm(10^4)*coefs_model[2,2] ) %>%
+  gather(type, parameter)
+
+
+wykres %>%
+  ggplot(aes(x = parameter, col = type)) + 
+  geom_density()
+
+```
+  
+Poza skal¹, wykresy prezentuj¹ siê tak samo jak w poprzednim przypadku. Tu równie¿ nie spe³ni³o siê moje podejrzenie, ponownie wiêkszy "rozrzut" jest dla metody boootstrapowej.  
+
+### Podsumowanie  
+
+Ostatecznie, w obu przypadkach, spalanie zale¿y od koni mechanicznych i wagi samochodu. Sprawdzi³y siê moje hipotezy dotycz¹ce braku zmiennej "displacement" lub/i "cylinders" oraz braku wp³ywu pochodzenia. Zosta³y spe³nione za³o¿enia dotycz¹ce normalnoœci rozk³adu reszt, heteroskedastycznoœci, liniowoœci modelu oraz autokorelacji.  
+Model bootstrapowy okaza³ siê byæ lepiej dopasowany do modelu, ale wi¹zaæ siê to mo¿e z przeuczeniem modelu, choæ ró¿nica miêdzy dwoma modelami jest nieznaczna i mo¿e wynikaæ z wartoœci parametrów.  
+Zaskoczenie stanowi³y wykresy przedzia³ów ufnoœci dla modeli - spodziewa³em siê odwrotnych rezultatów.  
